@@ -20,7 +20,6 @@ class LayerNorm(nn.Module):
 
 class ScaledDotProductAttention(nn.Module):
 
-
     def __init__(self, queries_dim, keys_dim, values_dim):
         super(ScaledDotProductAttention, self).__init__()
         self.q_dim = queries_dim
@@ -63,7 +62,7 @@ class MultiheadAttention(nn.Module):
             lin_ = []
             q_linear =  nn.Linear(self.model_dim, self.q_dim)
             k_linear =  nn.Linear(self.model_dim, self.k_dim)
-            v_linear =  nn.Linear(self.model_dim, self.v_linear)
+            v_linear =  nn.Linear(self.model_dim, self.v_dim)
             lin_.append(q_linear)
             lin_.append(k_linear)
             lin_.append(v_linear)
@@ -114,19 +113,25 @@ class Encoder_Layer(nn.Module):
         self.queries_dim = queries_dim
         self.keys_dim = keys_dim
         self.value_dim = values_dim
-
+        # Embeddings
         self.multi_headed_attn = MultiheadAttention(model_dim=self.model_dim, queries_dim=self.queries_dim,
                                                     values_dim=self.value_dim, num_heads=self.num_heads
                                                     ,keys_dim=self.keys_dim)
+
         self.final_linear = FFN(self.model_dim)
         self.layer_norm = LayerNorm(self.model_dim)
 
-    def forward(self, x):
+        if use_cuda:
+            self.multi_headed_attn = self.multi_headed_attn.cuda()
+            self.final_linear = self.final_linear.cuda()
+            self.layer_norm =  self.layer_norm.cuda()
+
+    def forward(self, encoded_input):
 
         # x is the input positional embedding-> We first calcualte the multiheaded attention for x
-        multi_head_output = self.multi_headed_attn(x)
+        multi_head_output = self.multi_headed_attn(encoded_input, encoded_input, encoded_input)
         # Add the residual input
-        x = x+multi_head_output
+        x = encoded_input + multi_head_output
         # Normalize the output
         multi_out = self.layer_norm(x)
 
@@ -140,7 +145,7 @@ class Encoder_Layer(nn.Module):
 
 class Encoder(nn.Module):
 
-    def __init__(self, num_layers, model_dim, queries_dim, keys_dim, values_dim, num_heads):
+    def __init__(self, num_layers, model_dim, queries_dim, keys_dim, values_dim, num_heads, n_vocab):
         super(Encoder, self).__init__()
         self.num_layers = num_layers
         self.num_heads = num_heads
@@ -148,18 +153,21 @@ class Encoder(nn.Module):
         self.queries_dim = queries_dim
         self.keys_dim = keys_dim
         self.values_dim = values_dim
-
+        self.vocab_size = n_vocab
+        self.embedding = nn.Embedding(self.vocab_size, self.model_dim)
         # List of Encoder Layers
         self.encoder_layers = nn.ModuleList([Encoder_Layer(self.model_dim, self.queries_dim,
-                                                           self.keys_dim, self.values_dim, self.num_heads) for i in num_layers])
+                                                           self.keys_dim, self.values_dim, self.num_heads) for i in range(num_layers)])
 
+        if use_cuda:
+            self.encoder_layers = self.encoder_layers.cuda()
 
     def forward(self, x):
+        x = self.embedding(x)
         for i, l in enumerate(self.encoder_layers):
-            x = self.encoder_layers(x)
-
+            x = l(x)
         output = x
-        return x
+        return output
 
 
 class Decoder_Layer(nn.Module):
@@ -171,7 +179,6 @@ class Decoder_Layer(nn.Module):
         self.queries_dim = queries_dim
         self.keys_dim = keys_dim
         self.value_dim = values_dim
-
         self.multi_head_attn_input =   MultiheadAttention(model_dim=self.model_dim, queries_dim=self.queries_dim,
                                                     values_dim=self.value_dim, num_heads=self.num_heads
                                                     ,keys_dim=self.keys_dim, masking=True)
@@ -180,21 +187,26 @@ class Decoder_Layer(nn.Module):
                                                     values_dim=self.value_dim, num_heads=self.num_heads
                                                     ,keys_dim=self.keys_dim)
 
-
         self.final_linear_layer = FFN(self.model_dim)
         self.layer_norm = LayerNorm(self.model_dim)
 
-    def forward(self, inp, encoder_input):
+        if use_cuda:
+            self.multi_head_attn_input = self.multi_head_attn_input.cuda()
+            self.multi_head_attn_encoder = self.multi_head_attn_encoder.cuda()
+            self.final_linear = self.final_linear.cuda()
+            self.layer_norm =  self.layer_norm.cuda()
+
+    def forward(self, decoder_input, encoder_output):
 
         # Input x is the positional encoding of the output embedding
         # Apply masked multihead attention on x
-        x = self.multi_head_attn_input(inp)
-        x =  x+inp
+        x = self.multi_head_attn_input(decoder_input, decoder_input, decoder_input)
+        x =  x + decoder_input
         multi_output = self.layer_norm(x)
 
 
         # The multi output goes to the unmasked multihead attention
-        x = self.multi_head_attn_encoder(multi_output, encoder_input)
+        x = self.multi_head_attn_encoder(multi_output, encoder_output, encoder_output)
         x = x + multi_output
         multi_unmasked_output = self.layer_norm(x)
 
@@ -204,7 +216,90 @@ class Decoder_Layer(nn.Module):
         x = self.layer_norm(x)
 
         output = x
-        return x
+        return output
+
+
+class Decoder(nn.Module):
+
+    def __init__(self, model_dim, queries_dim, values_dim, keys_dim, num_heads, n_vocab, num_layers):
+        super(Decoder, self).__init__()
+        self.num_heads = num_heads
+        self.num_layers = num_layers
+        self.model_dim = model_dim
+        self.q_dim = queries_dim
+        self.v_dim = values_dim
+        self.k_dim = keys_dim
+        self.vocab_size = n_vocab
+
+        self.embedding = nn.Embedding(n_vocab, model_dim)
+        self.decoder_layers = nn.ModuleList([Decoder_Layer(model_dim=self.model_dim, queries_dim=self.q_dim,
+                                                           values_dim=self.v_dim, keys_dim=self.k_dim, num_heads=self.num_heads )
+                                             for h in range(self.num_layers)])
+
+
+        if use_cuda:
+            self.decoder_layers = self.decoder_layers.cuda()
+
+    def forward(self, output_sentence, encoder_output):
+
+        x = self.embedding(output_sentence)
+        for i, l in enumerate(self.decoder_layers):
+          x = l(x, encoder_output)
+
+        output = x
+        return output
+
+
+class Transformer(nn.Module):
+
+    def __init__(self, queries_dim, keys_dim, values_dim, model_dim, num_encoder_layers, num_decoder_layers,
+                 n_source_vocab, num_encoder_heads, num_decoder_heads, n_target_vocab, dropout = 0.1):
+        super(Transformer, self).__init__()
+        self.model_dim = model_dim
+        self.queries_dim = queries_dim
+        self.values_dim = values_dim
+        self.keys_dim = keys_dim
+        self.dropout = dropout
+        self.num_encoder = num_encoder_layers
+        self.num_decoder = num_decoder_layers
+        self.num_encoder_heads = num_encoder_heads
+        self.num_decoder_heads = num_decoder_heads
+        self.n_encoder_vocab = n_source_vocab
+        self.n_decoder_vocab = n_target_vocab
+
+        # Encoder
+        self.encoder = Encoder(model_dim=self.model_dim, queries_dim=self.queries_dim,
+                               values_dim=self.values_dim, keys_dim=self.keys_dim,
+                               num_heads=self.num_encoder_heads, num_layers=self.num_encoder,n_vocab=self.n_encoder_vocab)
+
+        # Decoder
+        self.decoder = Decoder(model_dim=self.model_dim, queries_dim=self.queries_dim,
+                               values_dim= self.values_dim, keys_dim=self.keys_dim,
+                               num_heads=self.num_decoder_heads, num_layers=self.num_decoder, n_vocab=self.n_decoder_vocab)
+
+        if use_cuda:
+            self.encoder = self.encoder.cuda()
+            self.decoder = self.decoder.cuda()
+
+        self.target_word = nn.Linear(self.model_dim, self.n_decoder_vocab)
+
+        # Dropout
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, source, target):
+
+        encoder_output = self.encoder(source)
+        if use_cuda:
+            encoder_output = encoder_output.cuda()
+        decoder_output = self.decoder(target, encoder_output)
+        seq_logit =  self.target_word(decoder_output)
+        seq_logit = f.softmax(seq_logit)
+        return seq_logit.view(-1, seq_logit.size(2))
+
+
+
+
+
 
 
 
