@@ -97,7 +97,7 @@ def train_iters(model, n_epochs, print_every=1000, learning_rate=0.01):
 source_vocab, target_vocab  = data.get_vocab()
 
 # Actually training the model
-model = model_transformer.Transformer(queries_dim=512, keys_dim=512, values_dim=512, model_dim=512,
+model = model_transformer.Transformer(queries_dim=64, keys_dim=64, values_dim=64, model_dim=512,
                                       num_encoder_layers=6, num_decoder_layers=6, n_source_vocab=source_vocab,
                                       n_target_vocab=target_vocab, num_encoder_heads=8, num_decoder_heads=8)
 

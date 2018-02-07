@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as f
+import numpy as np
 use_cuda  = torch.cuda.is_available()
 
 
@@ -30,14 +31,24 @@ class ScaledDotProductAttention(nn.Module):
         # Inputs are Queries and keys (dimension dk) and values of dimension (dv)
 
         # Mat mul queries and keys
-        x = torch.bmm(queries, keys)
+        queries = queries.view((-1, self.q_dim))
+        keys = keys.squeeze()
+        queries = torch.transpose(queries, dim1=0, dim0=1)
+
+        print(queries, ' q ')
+        print(keys, ' k ')
+        x = torch.matmul(queries, keys)
         # Scale the value of x
-        x = x/torch.sqrt(self.k_dim)
+        x = x/np.sqrt(self.k_dim)
         # Apply softmax
         x = f.softmax(x, dim=-1)
         # Matrix multiply with values
-        output = torch.bmm(x, values)
-
+        print(x, ' x ')
+        values = values.squeeze()
+        values = torch.transpose(values, dim1=0, dim0=1)
+        print(values, ' v ')
+        output = torch.matmul(x, values)
+        print(output)
         return output
 
 
@@ -52,35 +63,42 @@ class MultiheadAttention(nn.Module):
         self.k_dim = keys_dim
         self.v_dim = values_dim
         self.mask = masking
-
-
         self.soft_attention_layers = []
         self.linear_layers = []
 
         # Generate linear representations of the queries, keys and values (h times)
         for h in range(self.num_heads):
             lin_ = []
-            q_linear =  nn.Linear(self.model_dim, self.q_dim)
-            k_linear =  nn.Linear(self.model_dim, self.k_dim)
-            v_linear =  nn.Linear(self.model_dim, self.v_dim)
+            q_linear = nn.Linear(self.model_dim, self.q_dim)
+            k_linear = nn.Linear(self.model_dim, self.k_dim)
+            v_linear = nn.Linear(self.model_dim, self.v_dim)
+            if use_cuda:
+                q_linear = q_linear.cuda()
+                k_linear = k_linear.cuda()
+                v_linear = v_linear.cuda()
             lin_.append(q_linear)
             lin_.append(k_linear)
             lin_.append(v_linear)
             self.linear_layers.append(lin_)
 
         self.multi_head_lin =  nn.Linear(self.num_heads*self.v_dim, self.model_dim)
+        self.sc = ScaledDotProductAttention(self.q_dim, self.k_dim, self.v_dim)
+        if use_cuda:
+            self.sc = self.sc.cuda()
 
     def forward(self, queries, keys, values):
         for lin_l in self.linear_layers:
+
             q_linear = lin_l[0](queries)
             k_linear = lin_l[1](keys)
             v_linear = lin_l[2](values)
-            sc = ScaledDotProductAttention(self.q_dim, self.k_dim, self.v_dim)
-            output = sc(q_linear, k_linear, v_linear)
+            output = self.sc(q_linear, k_linear, v_linear)
             self.soft_attention_layers.append(output)
 
         # Concatenate the different head outputs
         concat = torch.cat(self.soft_attention_layers)
+
+        concat = torch.transpose(concat, dim1=0, dim0=1)
         multihead_output = self.multi_head_lin(concat)
 
         return multihead_output
@@ -93,7 +111,7 @@ class FFN(nn.Module):
         super(FFN, self).__init__()
         self.model_dim = model_dim
 
-        self.linear_1=  nn.Linear(model_dim, model_dim)
+        self.linear_1= nn.Linear(model_dim, model_dim)
         self.relu = nn.ReLU(inplace=True)
         self.linear_final = nn.Linear(model_dim, model_dim)
 
@@ -102,6 +120,7 @@ class FFN(nn.Module):
         x = self.relu(x)
         output = self.linear_final(x)
         return output
+
 
 
 class Encoder_Layer(nn.Module):
@@ -130,6 +149,7 @@ class Encoder_Layer(nn.Module):
 
         # x is the input positional embedding-> We first calcualte the multiheaded attention for x
         multi_head_output = self.multi_headed_attn(encoded_input, encoded_input, encoded_input)
+
         # Add the residual input
         x = encoded_input + multi_head_output
         # Normalize the output
@@ -164,8 +184,10 @@ class Encoder(nn.Module):
 
     def forward(self, x):
         x = self.embedding(x)
+        print(x)
         for i, l in enumerate(self.encoder_layers):
             x = l(x)
+            print(x)
         output = x
         return output
 
@@ -193,7 +215,7 @@ class Decoder_Layer(nn.Module):
         if use_cuda:
             self.multi_head_attn_input = self.multi_head_attn_input.cuda()
             self.multi_head_attn_encoder = self.multi_head_attn_encoder.cuda()
-            self.final_linear = self.final_linear.cuda()
+            self.final_linear_layer = self.final_linear_layer.cuda()
             self.layer_norm =  self.layer_norm.cuda()
 
     def forward(self, decoder_input, encoder_output):
